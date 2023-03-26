@@ -178,20 +178,20 @@ class Snapchat(PlatformChecker):
         ) as r:
             # Non-JSON received if too many requests
             json_body = await self.get_json(r)
-            if "error_message" in json_body["reference"]:
+            if "error_message" in json_body["value"]:
                 return self.response_unavailable_or_invalid(
                     username,
-                    message=json_body["reference"]["error_message"],
+                    message=json_body["value"]["error_message"],
                     unavailable_messages=Snapchat.USERNAME_TAKEN_MSGS,
                 )
-            elif json_body["reference"]["status_code"] == "OK":
+            elif json_body["value"]["status_code"] == "OK":
                 return self.response_available(username)
 
     # Email: Snapchat doesn't associate email addresses with accounts
 
 
 class Instagram(PlatformChecker):
-    URL = "https://instagram.com"
+    URL = "https://www.instagram.com/api/v1/public/landing_info/"
     ENDPOINT = "https://www.instagram.com/accounts/web_create_ajax/attempt/"
     USERNAME_TAKEN_MSGS = [
         "This username isn't available.",
@@ -295,7 +295,8 @@ class GitHub(PlatformChecker):
         else:
             (_, email_token) = pr
         async with self.post(
-            GitHub.EMAIL_ENDPOINT, data={"value": email, "authenticity_token": email_token},
+            GitHub.EMAIL_ENDPOINT,
+            data={"value": email, "authenticity_token": email_token},
         ) as r:
             if r.status == 422:
                 text = await self.get_text(r)
@@ -310,12 +311,7 @@ class GitHub(PlatformChecker):
 
 class Tumblr(PlatformChecker):
     URL = "https://tumblr.com/register"
-    ENDPOINT = "https://www.tumblr.com/svc/account/register"
-    USERNAME_TAKEN_MSGS = [
-        "That's a good one, but it's taken",
-        "Someone beat you to that username",
-        "Try something else, that one is spoken for",
-    ]
+    ENDPOINT = "https://www.tumblr.com/api/v2/register/account/validate"
     USERNAME_LINK_FORMAT = "https://{}.tumblr.com"
 
     SAMPLE_UNUSED_EMAIL = "akc2rW33AuSqQWY8@gmail.com"
@@ -325,9 +321,7 @@ class Tumblr(PlatformChecker):
     async def prerequest(self):
         async with self.get(Tumblr.URL) as r:
             text = await self.get_text(r)
-            match = re.search(
-                r'<meta name="tumblr-form-key" id="tumblr_form_key" content="([^\s]*)">', text
-            )
+            match = re.search(r'"API_TOKEN":"([\s\S]+?)"', text)
             if match:
                 token = match.group(1)
                 return token
@@ -337,32 +331,35 @@ class Tumblr(PlatformChecker):
         token = await self.get_token()
         async with self.post(
             Tumblr.ENDPOINT,
-            data={
-                "action": "signup_account",
-                "form_key": token,
-                "user[email]": email,
-                "user[password]": Tumblr.SAMPLE_PASSWORD,
-                "tumblelog[name]": username,
+            json={
+                "email": email,
+                "tumblelog": username,
+                "password": Tumblr.SAMPLE_PASSWORD,
+            },
+            headers={
+                "authorization": f"Bearer {token}",
             },
         ) as r:
             json_body = await self.get_json(r)
-            if username == query:
-                if "usernames" in json_body or len(json_body["errors"]) > 0:
-                    return self.response_unavailable_or_invalid(
-                        query,
-                        message=json_body["errors"][0],
-                        unavailable_messages=Tumblr.USERNAME_TAKEN_MSGS,
+            if "error" in json_body["response"] and "code" in json_body["response"]:
+                if json_body["response"]["code"] == 3 and username == query:
+                    return self.response_unavailable(
+                        username,
+                        message=json_body["response"]["error"],
                         link=Tumblr.USERNAME_LINK_FORMAT.format(query),
                     )
-                elif json_body["errors"] == []:
-                    return self.response_available(query)
-            elif email == query:
-                if "This email address is already in use." in json_body["errors"]:
-                    return self.response_unavailable(query, message=json_body["errors"][0],)
-                elif "This email address isn't correct. Please try again." in json_body["errors"]:
-                    return self.response_invalid(query, message=json_body["errors"][0])
-                elif json_body["errors"] == []:
-                    return self.response_available(query)
+                elif json_body["response"]["code"] == 2 and email == query:
+                    return self.response_unavailable(
+                        email,
+                        message=json_body["response"]["error"],
+                        link=Tumblr.USERNAME_LINK_FORMAT.format(query),
+                    )
+                else:
+                    return self.response_invalid(query, message=json_body["response"]["error"])
+            elif json_body["meta"]["status"] == 200:
+                return self.response_available(query)
+            else:
+                return self.response_failure(query, message="Unknown response")
 
     async def check_username(self, username):
         return await self._check(username=username)
@@ -537,38 +534,30 @@ class Lastfm(PlatformChecker):
         return await self._check(username=username)
 
 
-class Spotify(PlatformChecker):
-    URL = "https://www.spotify.com/signup/"
-    EMAIL_ENDPOINT = "https://spclient.wg.spotify.com/signup/public/v1/account"
-
-    async def check_email(self, email):
-        async with self.get(Spotify.EMAIL_ENDPOINT, params={"validate": 1, "email": email}) as r:
-            json_body = await self.get_json(r)
-            if json_body["status"] == 1:
-                return self.response_available(email)
-            elif json_body["status"] == 20:
-                return self.response_unavailable(email, message=json_body["errors"]["email"])
-            else:
-                return self.response_failure(email, message=json_body["errors"]["email"])
-
-
 class Yahoo(PlatformChecker):
     URL = "https://login.yahoo.com/account/create"
     USERNAME_ENDPOINT = "https://login.yahoo.com/account/module/create?validateField=yid"
 
     # Modified from Yahoo source
     error_messages = {
-        "IDENTIFIER_EXISTS": "A Yahoo account already exists with this username.",
-        "RESERVED_WORD_PRESENT": "A reserved word is present in the username",
-        "FIELD_EMPTY": "This is required.",
-        "SOME_SPECIAL_CHARACTERS_NOT_ALLOWED": "You can only use letters, numbers, full stops (‘.’) and underscores (‘_’) in your username",
-        "CANNOT_END_WITH_SPECIAL_CHARACTER": "Your username has to end with a letter or a number",
+        "IDENTIFIER_EXISTS": "A Yahoo account already exists with this email address. REPLACE_SIGNIN_LINK.",
+        "DANGLING_IDENTIFIER_EXISTS": "A Yahoo account already exists with this email address.",
+        "IDENTIFIER_NOT_AVAILABLE": "This email address is not available for sign up, try something else",
+        "EMAIL_DOMAIN_NOT_ALLOWED": "You cannot use this email address. Instead try creating Yahoo email address",
+        "RESERVED_WORD_PRESENT": "A Yahoo account already exists with this email address.",
+        "SOME_SPECIAL_CHARACTERS_NOT_ALLOWED": "You can only use letters, numbers, periods (‘.’), and underscores (‘_’) in your username.",
+        "SOME_SPECIAL_CHARACTERS_NOT_ALLOWED_IN_EMAIL": "Make sure you use your full email address, including an “@” sign and a domain.",
+        "INVALID_IDENTIFIER": "Error: Invalid identifier.",
+        "CANNOT_END_WITH_SPECIAL_CHARACTER": "Your username has to end with a letter or a number.",
         "CANNOT_HAVE_MORE_THAN_ONE_PERIOD": "You can’t have more than one ‘.’ in your username.",
-        "NEED_AT_LEAST_ONE_ALPHA": "Please use at least one letter in your username",
-        "CANNOT_START_WITH_SPECIAL_CHARACTER_OR_NUMBER": "Your username has to start with a letter",
+        "NEED_AT_LEAST_ONE_ALPHA": "Please use at least one letter in your username.",
+        "CANNOT_START_WITH_SPECIAL_CHARACTER_OR_NUMBER": "Your username has to start with a letter.",
         "CONSECUTIVE_SPECIAL_CHARACTERS_NOT_ALLOWED": "You can’t have more than one ‘.’ or ‘_’ in a row.",
-        "LENGTH_TOO_SHORT": "That username is too short, please use a longer one.",
-        "LENGTH_TOO_LONG": "That username is too long, please use a shorter one.",
+        "INVALID_NAME_LENGTH": "That name is too long.",
+        "LENGTH_TOO_SHORT": "That email address is too short, please use a longer one.",
+        "LENGTH_TOO_LONG": "That email address is too long, please use a shorter one.",
+        "NAME_CONTAINS_URL": "You can't use this name",
+        "ELECTION_SPECIFIC_WORD_PRESENT": "Not available, try something else.",
     }
 
     regex = re.compile(r"v=1&s=([^\s]*)")
@@ -593,7 +582,12 @@ class Yahoo(PlatformChecker):
             else:
                 error = json_body["errors"][2]["error"]
                 error_pretty = self.error_messages.get(error, error.replace("_", " ").capitalize())
-                if error == "IDENTIFIER_EXISTS" or error == "RESERVED_WORD_PRESENT":
+                if error in (
+                    "IDENTIFIER_EXISTS",
+                    "RESERVED_WORD_PRESENT",
+                    "IDENTIFIER_NOT_AVAILABLE",
+                    "DANGLING_IDENTIFIER_EXISTS",
+                ):
                     return self.response_unavailable(username, message=error_pretty)
                 else:
                     return self.response_invalid(username, message=error_pretty)
@@ -622,7 +616,6 @@ class Platforms(Enum):
     PINTEREST = Pinterest
     REDDIT = Reddit
     SNAPCHAT = Snapchat
-    SPOTIFY = Spotify
     TWITTER = Twitter
     TUMBLR = Tumblr
     YAHOO = Yahoo
